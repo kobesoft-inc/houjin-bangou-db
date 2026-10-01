@@ -24,11 +24,14 @@ selDlFileNoパラメータ）で実現されているため、GETでトークン
   （公式仕様書の4種 + 「0:有効」というこのDB独自の値）
 - corporations  : 法人番号(BIGINT) -> 商号名称, 都道府県コード, 市区町村コード,
   住所詳細(丁目番地等), 法人種別コード(kind), 登記記録の閉鎖等の事由コード(close_cause)
+  - name_core: nameから会社の種類（「株式会社」「（株）」「医療法人」等）と空白を除き、英字を
+    大文字にした「名前の芯」。「トヨタ」で「株式会社トヨタ…」「トヨタ…株式会社」の両方を前方一致で
+    探すためのもの。索引 idx_corporations_name_core 付き（照合順序は既定のBINARY）。
   - 廃止・清算結了・合併等により無効になった法人番号も、close_causeに事由コードを
     設定した上で取り込む（0 = 有効）。close_causeにインデックスを張っているため、
     「有効なものだけ」の絞り込み（`WHERE close_cause = 0`）は高速に行える。
   - 処理区分が「99:削除」の法人番号（指定そのものが撤回されたもの）は取り込み対象から削除する。
-- meta          : 同期状態（全件データの作成日、最終適用済み差分日）を記録する内部テーブル
+- meta          : 同期状態（全件データの作成日、最終適用済み差分日）とスキーマの版を記録する内部テーブル
 
 商号又は名称は、検索・比較しやすいよう以下の正規化を行う。
 
@@ -37,6 +40,14 @@ selDlFileNoパラメータ）で実現されているため、GETでトークン
 - 各種中黒類（半角中黒、中点等）を「・」に統一。
 - 空白（半角スペース・全角スペース等の連続）を全角スペース1つに統一。
 - 上記の結果、残った半角英数記号は全角に変換する（全て全角にする）。
+
+name_core（名前の芯）は、正規化した名前から次のように作る。
+
+- 会社の種類の言葉（LEGAL_FORMS。長いものから順に、名前のどの位置にあっても）を取り除く。
+- 全角スペースをすべて取り除く。
+- 英字を大文字にする。
+- 取り除いた結果が空になる場合（名前が会社の種類だけ等）は、種類を取り除かずに、
+  全角スペースの除去と大文字化だけを行う。
 """
 
 import argparse
@@ -87,6 +98,10 @@ CLOSE_CAUSE_LABELS = {
     31: "その他の清算の結了等",
 }
 
+# スキーマの版（meta テーブルの schema_version に入れる）。列・索引を足したら上げる。
+# 1: （版の記録なし）  2: corporations に name_core 列と idx_corporations_name_core 索引を追加
+SCHEMA_VERSION = 2
+
 # 処理区分「99」は、法人番号の指定が撤回されたことを表す（全項目がブランクになる）
 PROCESS_DELETE = "99"
 
@@ -120,7 +135,8 @@ CREATE TABLE IF NOT EXISTS corporations (
     city_code        TEXT NOT NULL REFERENCES cities (city_code),
     address          TEXT NOT NULL,
     kind             INTEGER NOT NULL REFERENCES kinds (kind_code),
-    close_cause      INTEGER NOT NULL DEFAULT 0 REFERENCES close_causes (close_cause_code)
+    close_cause      INTEGER NOT NULL DEFAULT 0 REFERENCES close_causes (close_cause_code),
+    name_core        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_corporations_name ON corporations (name);
 CREATE INDEX IF NOT EXISTS idx_corporations_city_code ON corporations (city_code);
@@ -131,6 +147,10 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 """
+
+# name_core の索引は、全件の投入が終わってから作る（投入しながら張ると、名前の芯の順に
+# ばらばらに挿し込むことになり遅いため）。
+NAME_CORE_INDEX = "CREATE INDEX IF NOT EXISTS idx_corporations_name_core ON corporations (name_core)"
 
 # --- 商号又は名称の正規化 -------------------------------------------------
 
@@ -146,6 +166,27 @@ def normalize_name(raw):
     s = _WHITESPACE_RE.sub("　", s).strip("　 \t")
     s = "".join(chr(ord(c) + 0xFEE0) if 0x21 <= ord(c) <= 0x7E else c for c in s)
     return s
+
+
+# 名前の芯を作るときに取り除く、会社の種類の言葉。長いものから順に並べ、この順に取り除く。
+LEGAL_FORMS = (
+    "特定非営利活動法人", "地方独立行政法人", "国立大学法人", "独立行政法人",
+    "一般社団法人", "一般財団法人", "公益社団法人", "公益財団法人",
+    "医療法人社団", "医療法人財団", "社会福祉法人", "有限責任事業組合",
+    "医療法人", "学校法人", "宗教法人", "弁護士法人", "税理士法人", "司法書士法人",
+    "行政書士法人", "監査法人", "社会保険労務士法人", "農事組合法人",
+    "株式会社", "有限会社", "合同会社", "合名会社", "合資会社",
+    "（株）", "（有）", "（同）", "（名）", "（資）", "（社）", "（財）", "（医）", "（福）", "（学）", "（宗）",
+)  # fmt: skip
+
+
+def core_name(normalized):
+    """正規化済みの名前から「名前の芯」（name_core）を作る。normalize_name の結果を渡すこと。"""
+    core = normalized
+    for form in LEGAL_FORMS:
+        core = core.replace(form, "")
+    core = core.replace("　", "")
+    return (core if core else normalized.replace("　", "")).upper()
 
 
 # --- HTTP（セッションcookie + CSRFトークン + フォームPOST） ----------------
@@ -267,11 +308,21 @@ def apply_rows(conn, rows):
         cities[city_code] = (prefecture_code, city_name)
 
         name = normalize_name(row[6])
+        name_core = core_name(name)
         address = row[11].strip()
         kind = int(row[8])
         close_cause = int(row[19]) if row[19] else 0  # 0 = 有効（閉鎖等なし）
         upserts.append(
-            (int(corporate_number), name, prefecture_code, city_code, address, kind, close_cause)
+            (
+                int(corporate_number),
+                name,
+                name_core,
+                prefecture_code,
+                city_code,
+                address,
+                kind,
+                close_cause,
+            )
         )
 
     if prefectures:
@@ -290,10 +341,10 @@ def apply_rows(conn, rows):
     if upserts:
         conn.executemany(
             "INSERT INTO corporations "
-            "(corporate_number, name, prefecture_code, city_code, address, kind, close_cause) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "(corporate_number, name, name_core, prefecture_code, city_code, address, kind, close_cause) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(corporate_number) DO UPDATE SET "
-            "name = excluded.name, prefecture_code = excluded.prefecture_code, "
+            "name = excluded.name, name_core = excluded.name_core, prefecture_code = excluded.prefecture_code, "
             "city_code = excluded.city_code, address = excluded.address, "
             "kind = excluded.kind, close_cause = excluded.close_cause",
             upserts,
@@ -367,6 +418,7 @@ def build_database(db_path):
         upserts, deletes = apply_rows(conn, iter_csv_rows(csv_text))
         print(f"  有効: {upserts} 件, 除外(廃止等): {deletes} 件", file=sys.stderr)
         set_meta(conn, "baseline_date", baseline_date.isoformat())
+        set_meta(conn, "schema_version", str(SCHEMA_VERSION))
 
         latest_date = baseline_date
         diff_entries = get_diff_file_list(opener)
@@ -387,6 +439,10 @@ def build_database(db_path):
             )
 
         set_meta(conn, "last_diff_date", latest_date.isoformat())
+        conn.execute(NAME_CORE_INDEX)
+        # 統計を持たせる。無いと「close_cause = 0 AND 名前の芯の前方一致 ORDER BY name_core」のような
+        # 問い合わせで、前方一致の索引ではなく close_cause の索引が選ばれて約1秒かかる。
+        conn.execute("ANALYZE")
         conn.commit()
         conn.execute("VACUUM")
 
