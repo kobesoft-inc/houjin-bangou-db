@@ -100,7 +100,8 @@ CLOSE_CAUSE_LABELS = {
 
 # スキーマの版（meta テーブルの schema_version に入れる）。列・索引を足したら上げる。
 # 1: （版の記録なし）  2: corporations に name_core 列と idx_corporations_name_core 索引を追加
-SCHEMA_VERSION = 2
+# 3: 都道府県で絞った前方一致のための複合索引 idx_corporations_prefecture_name / _prefecture_name_core を追加
+SCHEMA_VERSION = 3
 
 # 処理区分「99」は、法人番号の指定が撤回されたことを表す（全項目がブランクになる）
 PROCESS_DELETE = "99"
@@ -151,6 +152,14 @@ CREATE TABLE IF NOT EXISTS meta (
 # name_core の索引は、全件の投入が終わってから作る（投入しながら張ると、名前の芯の順に
 # ばらばらに挿し込むことになり遅いため）。
 NAME_CORE_INDEX = "CREATE INDEX IF NOT EXISTS idx_corporations_name_core ON corporations (name_core)"
+
+# 都道府県で絞った前方一致のための複合索引（prefecture_code = ? AND name >= ? AND name < ?）。
+# 都道府県の索引が無いと、広い前方一致（「株式会社」など）の中から少ない県を探すのに全部を読む。
+# name_core と同じく、全件の投入が終わってから作る。
+PREFECTURE_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_corporations_prefecture_name ON corporations (prefecture_code, name)",
+    "CREATE INDEX IF NOT EXISTS idx_corporations_prefecture_name_core ON corporations (prefecture_code, name_core)",
+)
 
 # --- 商号又は名称の正規化 -------------------------------------------------
 
@@ -440,6 +449,8 @@ def build_database(db_path):
 
         set_meta(conn, "last_diff_date", latest_date.isoformat())
         conn.execute(NAME_CORE_INDEX)
+        for statement in PREFECTURE_INDEXES:
+            conn.execute(statement)
         # 統計を持たせる。無いと「close_cause = 0 AND 名前の芯の前方一致 ORDER BY name_core」のような
         # 問い合わせで、前方一致の索引ではなく close_cause の索引が選ばれて約1秒かかる。
         conn.execute("ANALYZE")

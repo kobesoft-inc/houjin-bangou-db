@@ -110,8 +110,9 @@ WHERE c.corporate_number = 1000020328642;
 | --- | --- |
 | 1 | （記録なし）最初の形 |
 | 2 | `corporations`に`name_core`列と`idx_corporations_name_core`索引を追加 |
+| 3 | 都道府県で絞った前方一致のための複合索引`idx_corporations_prefecture_name`（`prefecture_code, name`）・`idx_corporations_prefecture_name_core`（`prefecture_code, name_core`）を追加（ファイルは約0.45GB大きくなります） |
 
-版2は追加だけで、既存の列・索引・値の意味は変わりません（`name_core`は最後の列に追加しています）。
+版2・版3は追加だけで、既存の列・索引・値の意味は変わりません（`name_core`は最後の列に追加しています）。
 `SELECT *`を列の位置で読んでいる場合も、これまでの列の位置は変わりません。
 
 ## 検索のヒント
