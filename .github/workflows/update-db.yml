@@ -2,8 +2,8 @@ name: Update corporate number database
 
 on:
   schedule:
-    # 毎日 00:00 UTC (= 09:00 JST)
-    - cron: "0 0 * * *"
+    # 毎月10日 00:17 UTC (= 09:17 JST)。月末時点の全件データが公開された後に、それ以降の差分まで取り込んで作り直す
+    - cron: "17 0 10 * *"
   workflow_dispatch:
     inputs:
       force:
