@@ -160,6 +160,14 @@ class SchemaTest(unittest.TestCase):
         self.assertIn("idx_corporations_name_core", plan)
         self.assertEqual([1, 2], sorted(r[0] for r in self.conn.execute(sql, ("トヨタ", "トヨタ"))))
 
+    def test_prefecture_prefix_range_uses_the_composite_index(self):
+        for statement in build_db.PREFECTURE_INDEXES:
+            self.conn.execute(statement)
+        build_db.apply_rows(self.conn, [self.row(1, "トヨタ自動車株式会社"), self.row(2, "ホンダ")])
+        sql = "SELECT corporate_number FROM corporations WHERE prefecture_code = ? AND name >= ? AND name < ? || char(0x10FFFF)"
+        plan = " ".join(r[3] for r in self.conn.execute("EXPLAIN QUERY PLAN " + sql, ("23", "トヨタ", "トヨタ")))
+        self.assertIn("idx_corporations_prefecture_name", plan)
+
     def test_existing_columns_keep_their_order_and_name_core_is_last(self):
         columns = [r[1] for r in self.conn.execute("PRAGMA table_info(corporations)")]
         self.assertEqual(
