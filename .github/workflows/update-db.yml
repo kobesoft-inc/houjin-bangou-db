@@ -4,7 +4,12 @@ on:
   schedule:
     # 毎日 00:00 UTC (= 09:00 JST)
     - cron: "0 0 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "同じ日付のデータがリリース済みでも作り直す（スキーマの版を上げたときなど）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,6 +31,7 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
         run: |
           LATEST_AVAILABLE="$(python3 build_db.py --check-latest-date)"
           echo "latest_available=$LATEST_AVAILABLE" >> "$GITHUB_OUTPUT"
@@ -33,7 +39,7 @@ jobs:
           RELEASED_TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)"
           RELEASED_DATE="${RELEASED_TAG#db-}"
 
-          if [ "$LATEST_AVAILABLE" = "$RELEASED_DATE" ]; then
+          if [ "$LATEST_AVAILABLE" = "$RELEASED_DATE" ] && [ "${FORCE}" != "true" ]; then
             echo "最新データ($LATEST_AVAILABLE)は既にリリース済みです。"
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
